@@ -39,6 +39,8 @@ import (
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/common"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/interfaces"
+
+	// "github.com/llm-d-incubation/workload-variant-autoscaler/internal/limiter"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/saturation"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/utils"
@@ -537,6 +539,12 @@ func (e *Engine) CollectMetricsForSaturationMode(
 
 	return nil
 }
+
+// apply limited mode saturation decisions
+// limiterCapacityAllocator := limiter.NewLimitedCapacityAllocator(nil)
+// if err = limiterCapacityAllocator.Allocate(ctx, &allDecisions, vaMap, inventory); err != nil {
+// 	return err
+// }
 
 // applySaturationDecisions updates VA status and emits metrics based on Saturation decisions.
 func (e *Engine) applySaturationDecisions(
