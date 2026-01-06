@@ -162,7 +162,7 @@ func createCapacityData(
 			accCountMap[accType] = curCount + accInfo.Count
 		}
 	}
-	capData.Count = make([]config.AcceleratorCount, 0, len(accCountMap))
+	capData.Count = make([]config.AcceleratorCount, len(accCountMap))
 	i := 0
 	for accType, count := range accCountMap {
 		capData.Count[i] = config.AcceleratorCount{
@@ -175,13 +175,15 @@ func createCapacityData(
 }
 
 // createAcceleratorData creates AcceleratorData from the CapacityData
+// assumes that the Count in CapacityData is an array of unique accelerators,
+// each having a unique nonempty Type and positive Count.
 func createAcceleratorData(
 	capData *config.CapacityData,
 ) *config.AcceleratorData {
 	accData := &config.AcceleratorData{
 		Spec: []config.AcceleratorSpec{},
 	}
-	accData.Spec = make([]config.AcceleratorSpec, 0, len(capData.Count))
+	accData.Spec = make([]config.AcceleratorSpec, len(capData.Count))
 	for i, accCount := range capData.Count {
 		accData.Spec[i] = config.AcceleratorSpec{
 			Name: accCount.Type,
@@ -250,7 +252,7 @@ func createServiceClassData(
 				// requirements and configurations. For now, we are assigning all models to the default service class for simplicity.
 				Priority: 1,
 				ModelTargets: func() []config.ModelTarget {
-					targets := make([]config.ModelTarget, 0, len(modelNames))
+					targets := make([]config.ModelTarget, len(modelNames))
 					for i, modelName := range modelNames {
 						targets[i] = config.ModelTarget{
 							Model: modelName,
@@ -269,7 +271,7 @@ func createServerData(decisions []interfaces.VariantDecision) *config.ServerData
 	serverData := &config.ServerData{
 		Spec: []config.ServerSpec{},
 	}
-	serverSpecs := make([]config.ServerSpec, 0, len(decisions))
+	serverSpecs := make([]config.ServerSpec, len(decisions))
 	for i, decision := range decisions {
 		serverSpecs[i] = config.ServerSpec{
 			Name:            decision.VariantName,
