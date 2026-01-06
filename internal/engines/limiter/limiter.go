@@ -158,6 +158,9 @@ func createCapacityData(
 	accCountMap := make(map[string]int)
 	for _, accMap := range inventory {
 		for accType, accInfo := range accMap {
+			if accInfo.Count <= 0 {
+				continue
+			}
 			curCount := accCountMap[accType]
 			accCountMap[accType] = curCount + accInfo.Count
 		}
@@ -176,7 +179,7 @@ func createCapacityData(
 
 // createAcceleratorData creates AcceleratorData from the CapacityData
 // assumes that the Count in CapacityData is an array of unique accelerators,
-// each having a unique nonempty Type and positive Count.
+// each having a unique nonempty Type and a positive Count.
 func createAcceleratorData(
 	capData *config.CapacityData,
 ) *config.AcceleratorData {
@@ -271,9 +274,9 @@ func createServerData(decisions []interfaces.VariantDecision) *config.ServerData
 	serverData := &config.ServerData{
 		Spec: []config.ServerSpec{},
 	}
-	serverSpecs := make([]config.ServerSpec, len(decisions))
+	serverData.Spec = make([]config.ServerSpec, len(decisions))
 	for i, decision := range decisions {
-		serverSpecs[i] = config.ServerSpec{
+		serverData.Spec[i] = config.ServerSpec{
 			Name:            decision.VariantName,
 			Model:           decision.ModelID,
 			Class:           DefaultServiceClassName,
