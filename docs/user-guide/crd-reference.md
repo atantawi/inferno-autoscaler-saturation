@@ -14,25 +14,6 @@ Package v1alpha1 contains API Schema definitions for the llmd v1alpha1 API group
 
 
 
-#### AcceleratorProfile
-
-
-
-AcceleratorProfile defines the configuration for an accelerator used in autoscaling.
-It specifies the type and count of accelerator, as well as parameters for scaling behavior.
-
-
-
-_Appears in:_
-- [ModelProfile](#modelprofile)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `acc` _string_ | Acc specifies the type or name of the accelerator (e.g., GPU type). |  | MinLength: 1 <br /> |
-| `accCount` _integer_ | AccCount specifies the number of accelerator units to be used. |  | Minimum: 1 <br /> |
-| `maxBatchSize` _integer_ | MaxBatchSize is the maximum batch size supported by the accelerator. |  | Minimum: 1 <br /> |
-
-
 #### ActuationStatus
 
 
@@ -47,64 +28,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `applied` _boolean_ | Applied indicates whether the actuation was successfully applied. |  |  |
-
-
-#### Allocation
-
-
-
-Allocation describes the current resource allocation for a model variant.
-
-
-
-_Appears in:_
-- [VariantAutoscalingStatus](#variantautoscalingstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `accelerator` _string_ | Accelerator is the type of accelerator currently allocated. |  | MinLength: 1 <br /> |
-| `numReplicas` _integer_ | NumReplicas is the number of replicas currently allocated. |  | Minimum: 0 <br /> |
-| `maxBatch` _integer_ | MaxBatch is the maximum batch size currently allocated. |  | Minimum: 0 <br /> |
-| `itlAverage` _string_ | ITLAverage is the average inter token latency for the current allocation. |  | Pattern: `^\d+(\.\d+)?$` <br /> |
-| `ttftAverage` _string_ | TTFTAverage is the average time to first token for the current allocation |  | Pattern: `^\d+(\.\d+)?$` <br /> |
-| `load` _[LoadProfile](#loadprofile)_ | Load describes the workload characteristics for the current allocation. |  |  |
-
-
-#### LoadProfile
-
-
-
-LoadProfile represents the configuration for workload characteristics,
-including the rate of incoming requests (ArrivalRate) and the average
-length of each request (AvgLength). Both fields are specified as strings
-to allow flexible input formats.
-
-
-
-_Appears in:_
-- [Allocation](#allocation)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `arrivalRate` _string_ | ArrivalRate is the rate of incoming requests in inference server. |  |  |
-| `avgInputTokens` _string_ | AvgInputTokens is the average number of input(prefill) tokens per request in inference server. |  |  |
-| `avgOutputTokens` _string_ | AvgOutputTokens is the average number of output(decode) tokens per request in inference server. |  |  |
-
-
-#### ModelProfile
-
-
-
-ModelProfile provides resource and performance characteristics for the model variant.
-
-
-
-_Appears in:_
-- [VariantAutoscalingSpec](#variantautoscalingspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `accelerators` _[AcceleratorProfile](#acceleratorprofile) array_ | Accelerators is a list of accelerator profiles for the model variant. |  | MinItems: 1 <br /> |
 
 
 #### OptimizedAlloc
@@ -122,7 +45,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `lastRunTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#time-v1-meta)_ | LastRunTime is the timestamp of the last optimization run. |  |  |
 | `accelerator` _string_ | Accelerator is the type of accelerator for the optimized allocation. |  | MinLength: 2 <br /> |
-| `numReplicas` _integer_ | NumReplicas is the number of replicas for the optimized allocation. |  | Minimum: 0 <br /> |
+| `numReplicas` _integer_ | NumReplicas is the number of replicas for the optimized allocation. |  | Minimum: 1 <br /> |
 
 
 #### VariantAutoscaling
@@ -183,7 +106,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `scaleTargetRef` _[CrossVersionObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#crossversionobjectreference-v1-autoscaling)_ | ScaleTargetRef references the scalable resource to manage.<br />This follows the same pattern as HorizontalPodAutoscaler. |  | Required: \{\} <br /> |
 | `modelID` _string_ | ModelID specifies the unique identifier of the model to be autoscaled. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `modelProfile` _[ModelProfile](#modelprofile)_ | ModelProfile provides resource and performance characteristics for the model variant. |  | Optional: \{\} <br /> |
 | `variantCost` _string_ | VariantCost specifies the cost per replica for this variant (used in saturation analysis). | 10.0 | Optional: \{\} <br />Pattern: `^\d+(\.\d+)?$` <br /> |
 
 
@@ -192,7 +114,7 @@ _Appears in:_
 
 
 VariantAutoscalingStatus represents the current status of autoscaling for a variant,
-including the current allocation, desired optimized allocation, and actuation status.
+including the desired optimized allocation and actuation status.
 
 
 
@@ -201,7 +123,6 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `currentAlloc` _[Allocation](#allocation)_ | CurrentAlloc specifies the current resource allocation for the variant. |  | Optional: \{\} <br /> |
 | `desiredOptimizedAlloc` _[OptimizedAlloc](#optimizedalloc)_ | DesiredOptimizedAlloc indicates the target optimized allocation based on autoscaling logic. |  |  |
 | `actuation` _[ActuationStatus](#actuationstatus)_ | Actuation provides details about the actuation process and its current status. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#condition-v1-meta) array_ | Conditions represent the latest available observations of the VariantAutoscaling's state |  | Optional: \{\} <br /> |

@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-	"github.com/prometheus/common/model"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -35,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d-incubation/workload-variant-autoscaler/api/v1alpha1"
-	collector "github.com/llm-d-incubation/workload-variant-autoscaler/internal/collector"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/logging"
 	testutils "github.com/llm-d-incubation/workload-variant-autoscaler/test/utils"
 )
@@ -91,16 +89,6 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 						},
 						// Example spec fields, adjust as necessary
 						ModelID: "default-default",
-						ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-							Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-								{
-									Acc:      "A100",
-									AccCount: 1,
-
-									MaxBatchSize: 4,
-								},
-							},
-						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -147,17 +135,11 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			mockPromAPI := &testutils.MockPromAPI{
-				QueryResults: map[string]model.Value{},
-				QueryErrors:  map[string]error{},
-			}
+
 			// Initialize MetricsCollector with mock Prometheus API
-			metricsCollector := collector.NewPrometheusCollector(mockPromAPI)
 			controllerReconciler := &VariantAutoscalingReconciler{
-				Client:           k8sClient,
-				Scheme:           k8sClient.Scheme(),
-				PromAPI:          mockPromAPI,
-				MetricsCollector: metricsCollector,
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -169,7 +151,6 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 	})
 
 	Context("When validating configurations", func() {
-		const configResourceName = "config-test-resource"
 
 		BeforeEach(func() {
 			logging.NewTestLogger()
@@ -221,36 +202,6 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 			Expect(client.IgnoreNotFound(err)).NotTo(HaveOccurred())
 		})
 
-		It("should validate accelerator profiles", func() {
-			By("Creating VariantAutoscaling with invalid accelerator profile")
-			resource := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      configResourceName,
-					Namespace: "default",
-				},
-				Spec: llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{
-					ScaleTargetRef: autoscalingv1.CrossVersionObjectReference{
-						Kind: "Deployment",
-						Name: configResourceName,
-					},
-					ModelID: "default-default",
-					ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-						Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-							{
-								Acc:      "INVALID_GPU",
-								AccCount: -1, // Invalid count
-
-								MaxBatchSize: -1, // Invalid batch size
-							},
-						},
-					},
-				},
-			}
-			err := k8sClient.Create(ctx, resource)
-			Expect(err).To(HaveOccurred()) // Expect validation error at API level
-			Expect(err.Error()).To(ContainSubstring("Invalid value"))
-		})
-
 		It("should handle empty ModelID value", func() {
 			By("Creating VariantAutoscaling with empty ModelID")
 			resource := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
@@ -264,16 +215,7 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 						Name: "invalid-model-id",
 					},
 					ModelID: "", // Empty ModelID
-					ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-						Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-							{
-								Acc:      "A100",
-								AccCount: 1,
 
-								MaxBatchSize: 4,
-							},
-						},
-					},
 				},
 			}
 			err := k8sClient.Create(ctx, resource)
@@ -281,30 +223,6 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("spec.modelID"))
 		})
 
-		It("should handle empty accelerator list", func() {
-			By("Creating VariantAutoscaling with no accelerators")
-			resource := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "empty-accelerators",
-					Namespace: "default",
-				},
-				Spec: llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{
-					ScaleTargetRef: autoscalingv1.CrossVersionObjectReference{
-						Kind: "Deployment",
-						Name: "empty-accelerators",
-					},
-					ModelID: "default-default",
-					ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-						Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-							// no configuration for accelerators
-						},
-					},
-				},
-			}
-			err := k8sClient.Create(ctx, resource)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("spec.modelProfile.accelerators"))
-		})
 	})
 
 	Context("ServiceMonitor Watch", func() {
@@ -414,27 +332,14 @@ var _ = Describe("VariantAutoscalings Controller", func() {
 						Name: resourceName,
 					},
 					ModelID: "default-default",
-					ModelProfile: llmdVariantAutoscalingV1alpha1.ModelProfile{
-						Accelerators: []llmdVariantAutoscalingV1alpha1.AcceleratorProfile{
-							{
-								Acc:          "A100",
-								AccCount:     1,
-								MaxBatchSize: 4,
-							},
-						},
-					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 			// Mock controller components
-			mockPromAPI := &testutils.MockPromAPI{}
-			metricsCollector := collector.NewPrometheusCollector(mockPromAPI)
 			controllerReconciler := &VariantAutoscalingReconciler{
-				Client:           k8sClient,
-				Scheme:           k8sClient.Scheme(),
-				PromAPI:          mockPromAPI,
-				MetricsCollector: metricsCollector,
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
 			}
 
 			By("Reconciling - expect TargetNotFound")

@@ -35,10 +35,11 @@ import (
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d-incubation/workload-variant-autoscaler/api/v1alpha1"
 	actuator "github.com/llm-d-incubation/workload-variant-autoscaler/internal/actuator"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/collector"
-	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/collector/prometheus"
+	collectorv2 "github.com/llm-d-incubation/workload-variant-autoscaler/internal/collector/v2"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/common"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/limiter"
+	saturationmetrics "github.com/llm-d-incubation/workload-variant-autoscaler/internal/engines/saturation/metrics"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/interfaces"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d-incubation/workload-variant-autoscaler/internal/saturation"
@@ -50,19 +51,27 @@ type Engine struct {
 	scheme   *runtime.Scheme
 	executor executor.Executor
 
-	Recorder         record.EventRecorder
-	MetricsCollector interfaces.MetricsCollector
+	Recorder record.EventRecorder
 
-	// Saturation scaling config cache (thread-safe, updated on ConfigMap changes)
+	// ReplicaMetricsCollectorV2 is the v2 collector for replica metrics
+	ReplicaMetricsCollectorV2 *saturationmetrics.ReplicaMetricsCollector
+}
+
+// getVariantKey returns a unique key for a variant combining namespace and name.
+// This ensures no collisions when multiple namespaces have deployments with the same name.
+func getVariantKey(namespace, name string) string {
+	return namespace + "/" + name
 }
 
 // NewEngine creates a new instance of the saturation engine.
-func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.EventRecorder, collector interfaces.MetricsCollector) *Engine {
+func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.EventRecorder, metricsRegistry *collectorv2.SourceRegistry) *Engine {
+	promSource := metricsRegistry.Get("prometheus") // assume prometheus source is registered
+
 	engine := Engine{
-		client:           client,
-		scheme:           scheme,
-		Recorder:         recorder,
-		MetricsCollector: collector,
+		client:                    client,
+		scheme:                    scheme,
+		Recorder:                  recorder,
+		ReplicaMetricsCollectorV2: saturationmetrics.NewReplicaMetricsCollector(promSource, client),
 	}
 
 	engine.executor = executor.NewPollingExecutor(executor.PollingConfig{
@@ -72,6 +81,9 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 		Interval:     30 * time.Second,
 		RetryBackoff: 100 * time.Millisecond,
 	})
+
+	// Register saturation-specific queries in the metrics registry
+	saturationmetrics.RegisterSaturationQueries(metricsRegistry)
 
 	return &engine
 }
@@ -84,9 +96,9 @@ func (e *Engine) StartOptimizeLoop(ctx context.Context) {
 
 // optimize performs the optimization logic.
 func (e *Engine) optimize(ctx context.Context) error {
-	//TODO: move interval to manager.yaml
 	logger := ctrl.LoggerFrom(ctx)
 
+	//TODO: move interval to manager.yaml
 	interval := common.Config.GetOptimizationInterval()
 
 	// Update the executor interval if changed
@@ -135,6 +147,12 @@ func (e *Engine) optimize(ctx context.Context) error {
 		return nil
 	}
 
+	saturationConfig, ok := saturationConfigMap["default"]
+	if !ok {
+		logger.Info("Default saturation scaling config not found, skipping optimization")
+		return nil
+	}
+
 	// Group VAs by model for per-model capacity analysis
 	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)
 	logger.Info("Grouped VAs by model",
@@ -146,12 +164,16 @@ func (e *Engine) optimize(ctx context.Context) error {
 
 	// Create VA lookup map for applySaturationDecisions (used to access VA status and update decisions)
 	// Copy slice elements to local variable to ensure stable pointers
-	// Use deployment name (ScaleTargetName) as key since decision.VariantName uses deployment name
+	// Use namespace/deploymentName as key to avoid collisions when multiple namespaces have same deployment name
 	vaMap := make(map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling, len(activeVAs))
 	for i := range activeVAs {
 		va := activeVAs[i] // Copy to local variable to ensure stable pointer
-		vaMap[va.GetScaleTargetName()] = &va
+		vaMap[getVariantKey(va.Namespace, va.GetScaleTargetName())] = &va
 	}
+
+	// Create map to store current allocations populated during metrics collection
+	// Keyed by deployment name (ScaleTargetName)
+	currentAllocations := make(map[string]*interfaces.Allocation)
 
 	for groupKey, modelVAs := range modelGroups {
 		// The groupKey is "modelID|namespace" - extract actual modelID from VAs
@@ -163,27 +185,13 @@ func (e *Engine) optimize(ctx context.Context) error {
 			"variantCount", len(modelVAs),
 			"groupKey", groupKey)
 
-		// Collect metrics and populate CurrentAlloc for saturation-only mode
-		// This validates metrics availability and populates the VariantAutoscalings with CurrentAlloc
-		if err := e.CollectMetricsForSaturationMode(ctx, modelVAs, vaMap, e.client, e.MetricsCollector); err != nil {
-			logger.Error(err, "Failed to collect metrics for saturation mode",
-				"modelID", modelID)
-			// Metrics collection error - individual VAs are skipped
-		}
-
-		// Get saturation config for this model (use default)
-		var saturationConfig interfaces.SaturationScalingConfig
-		//TODO: if modelVAs is less than zero we continue saturation analysis and fail??
-		if len(modelVAs) > 0 {
-			saturationConfig = saturationConfigMap["default"]
-		}
-		saturationTargets, saturationAnalysis, variantStates, err := e.RunSaturationAnalysis(ctx, modelID, modelVAs, saturationConfig, e.client, e.MetricsCollector)
+		saturationTargets, saturationAnalysis, variantStates, err := e.RunSaturationAnalysis(ctx, modelID, modelVAs, saturationConfig, e.client)
 		if err != nil {
 			logger.Error(err, "Saturation analysis failed",
 				"modelID", modelID)
 
 			// Activate safety net to ensure HPA doesn't scale to zero on partial failure
-			e.emitSafetyNetMetrics(ctx, modelVAs)
+			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations)
 			continue
 		}
 
@@ -219,7 +227,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 	} else {
 		logger.Info("No scaling decisions to apply, updating VA status with metrics")
 	}
-	if err := e.applySaturationDecisions(ctx, allDecisions, vaMap); err != nil {
+	if err := e.applySaturationDecisions(ctx, allDecisions, vaMap, currentAllocations); err != nil {
 		logger.Error(err, "Failed to apply saturation decisions")
 		return err
 	}
@@ -236,18 +244,38 @@ func (e *Engine) optimize(ctx context.Context) error {
 func (e *Engine) BuildVariantStates(
 	ctx context.Context,
 	vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	deployments map[string]*appsv1.Deployment,
 	k8sClient client.Client,
 ) []interfaces.VariantReplicaState {
 	states := make([]interfaces.VariantReplicaState, 0, len(vas))
 
 	for _, va := range vas {
 		// Get current replicas from deployment using ScaleTargetRef
-		var deploy appsv1.Deployment
-		if err := utils.GetDeploymentWithBackoff(ctx, k8sClient, va.GetScaleTargetName(), va.Namespace, &deploy); err != nil {
-			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Could not get deployment for VA, skipping",
-				"variant", va.Name,
-				"error", err)
-			continue
+		// Get current replicas from deployment using ScaleTargetRef
+		var deploy *appsv1.Deployment
+		var found bool
+
+		// Try to look up in provided map first (optimization)
+		if deployments != nil {
+			// Deployment map is keyed by deployment name
+			// But do we know the deployment name?
+			// va.GetScaleTargetName() gives the name.
+			deploy, found = deployments[va.GetScaleTargetName()]
+		}
+
+		if !found {
+			// Fallback to API call
+			fetchedDeploy := &appsv1.Deployment{}
+			if err := utils.GetDeploymentWithBackoff(ctx, k8sClient, va.GetScaleTargetName(), va.Namespace, fetchedDeploy); err != nil {
+				ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Could not get deployment for VA, skipping",
+					"variant", va.Name,
+					"error", err)
+				continue
+			}
+			deploy = fetchedDeploy
+			ctrl.LoggerFrom(ctx).V(1).Info("BuildVariantStates fallback lookup", "variant", va.Name, "deployName", deploy.Name, "specReplicas", deploy.Spec.Replicas, "statusReplicas", deploy.Status.Replicas, "readyReplicas", deploy.Status.ReadyReplicas)
+		} else {
+			ctrl.LoggerFrom(ctx).V(1).Info("BuildVariantStates map lookup", "variant", va.Name, "deployName", deploy.Name, "specReplicas", deploy.Spec.Replicas, "statusReplicas", deploy.Status.Replicas, "readyReplicas", deploy.Status.ReadyReplicas)
 		}
 
 		currentReplicas := int(deploy.Status.Replicas)
@@ -255,10 +283,24 @@ func (e *Engine) BuildVariantStates(
 			currentReplicas = int(*deploy.Spec.Replicas)
 		}
 
+		// Calculate pending replicas (not yet ready)
+		readyReplicas := int(deploy.Status.ReadyReplicas)
+		pendingReplicas := currentReplicas - readyReplicas
+		if pendingReplicas < 0 {
+			// This indicates an unexpected state where readyReplicas exceeds currentReplicas.
+			// Log at Info level since this inconsistency should be visible to operators.
+			ctrl.LoggerFrom(ctx).Info("Unexpected state: readyReplicas exceeds currentReplicas, clamping pendingReplicas to 0",
+				"variant", va.Name, "currentReplicas", currentReplicas, "readyReplicas", readyReplicas)
+			pendingReplicas = 0
+		}
+
+		ctrl.LoggerFrom(ctx).V(1).Info("BuildVariantStates result", "variant", va.Name, "currentReplicas", currentReplicas, "readyReplicas", readyReplicas, "pendingReplicas", pendingReplicas)
+
 		states = append(states, interfaces.VariantReplicaState{
 			VariantName:     deploy.Name,
 			CurrentReplicas: currentReplicas,
 			DesiredReplicas: va.Status.DesiredOptimizedAlloc.NumReplicas,
+			PendingReplicas: pendingReplicas,
 		})
 	}
 
@@ -338,7 +380,6 @@ func (e *Engine) RunSaturationAnalysis(
 	modelVAs []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 	SaturationConfig interfaces.SaturationScalingConfig,
 	k8sClient client.Client,
-	metricsCollector interfaces.MetricsCollector,
 ) (map[string]int, *interfaces.ModelSaturationAnalysis, []interfaces.VariantReplicaState, error) {
 	if len(modelVAs) == 0 {
 		return nil, nil, nil, fmt.Errorf("no VAs provided for model %s", modelID)
@@ -381,8 +422,11 @@ func (e *Engine) RunSaturationAnalysis(
 		variantCosts[deploy.Name] = cost
 	}
 
-	// Collect Saturation metrics using the configured collector
-	replicaMetrics, err := metricsCollector.CollectReplicaMetrics(ctx, modelID, namespace, deployments, variantAutoscalings, variantCosts)
+	// Collect Saturation metrics using v2 collector
+	logger.V(logging.DEBUG).Info("Using v2 collector for replica metrics",
+		"modelID", modelID,
+		"namespace", namespace)
+	replicaMetrics, err := e.ReplicaMetricsCollectorV2.CollectReplicaMetrics(ctx, modelID, namespace, deployments, variantAutoscalings, variantCosts)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to collect Saturation metrics for model %s: %w", modelID, err)
 	}
@@ -416,7 +460,7 @@ func (e *Engine) RunSaturationAnalysis(
 		"scaleDownSafe", saturationAnalysis.ScaleDownSafe)
 
 	// Build variant states (current and desired replicas)
-	variantStates := e.BuildVariantStates(ctx, modelVAs, k8sClient)
+	variantStates := e.BuildVariantStates(ctx, modelVAs, deployments, k8sClient)
 
 	// Calculate saturation-based targets
 	saturationTargets := saturationAnalyzer.CalculateSaturationTargets(ctx, saturationAnalysis, variantStates)
@@ -428,137 +472,19 @@ func (e *Engine) RunSaturationAnalysis(
 	return saturationTargets, saturationAnalysis, variantStates, nil
 }
 
-// CollectMetricsForSaturationMode collects metrics and populates CurrentAlloc for VAs in saturation-only mode.
-func (e *Engine) CollectMetricsForSaturationMode(
-	ctx context.Context,
-	modelVAs []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	vaMap map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	k8sClient client.Client,
-	metricsCollector interfaces.MetricsCollector,
-) error {
-	logger := ctrl.LoggerFrom(ctx)
-
-	for i := range modelVAs {
-		va := &modelVAs[i]
-		modelName := va.Spec.ModelID
-
-		// Get accelerator name from VA labels - required field
-		accName := va.Labels["inference.optimization/acceleratorName"]
-		if accName == "" {
-			logger.Info("Missing accelerator name label for VA, skipping",
-				"variant", va.Name)
-			continue
-		}
-
-		// Extract accelerator cost from VA.Spec.VariantCost - required field
-		if va.Spec.VariantCost == "" {
-			logger.Info("Missing variant cost for VA, skipping",
-				"variant", va.Name)
-			continue
-		}
-		cost, err := strconv.ParseFloat(va.Spec.VariantCost, 64)
-		if err != nil {
-			logger.Info("Invalid variant cost for VA, skipping",
-				"variant", va.Name,
-				"cost", va.Spec.VariantCost,
-				"error", err)
-			continue
-		}
-
-		// Get Deployment using ScaleTargetRef
-		var deploy appsv1.Deployment
-		err = utils.GetDeploymentWithBackoff(ctx, k8sClient, va.GetScaleTargetName(), va.Namespace, &deploy)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Could not get deployment for VA, skipping",
-				"variant", va.Name,
-				"deployment", va.GetScaleTargetName(),
-				"error", err)
-			continue // Skip VAs without deployments
-		}
-
-		// Fetch latest VA from API server (use VA name, not deployment name - they are now decoupled)
-		var updateVA llmdVariantAutoscalingV1alpha1.VariantAutoscaling
-		err = utils.GetVariantAutoscalingWithBackoff(ctx, k8sClient, va.Name, va.Namespace, &updateVA)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to get VA",
-				"variant", va.Name,
-				"error", err)
-			continue
-		}
-
-		// Validate metrics availability before collecting
-		metricsValidation := metricsCollector.ValidateMetricsAvailability(ctx, modelName, deploy.Namespace)
-
-		// Update MetricsAvailable condition based on validation result
-		if metricsValidation.Available {
-			llmdVariantAutoscalingV1alpha1.SetCondition(&updateVA,
-				llmdVariantAutoscalingV1alpha1.TypeMetricsAvailable,
-				metav1.ConditionTrue,
-				metricsValidation.Reason,
-				metricsValidation.Message)
-		} else {
-			// Metrics unavailable - set condition and skip
-			llmdVariantAutoscalingV1alpha1.SetCondition(&updateVA,
-				llmdVariantAutoscalingV1alpha1.TypeMetricsAvailable,
-				metav1.ConditionFalse,
-				metricsValidation.Reason,
-				metricsValidation.Message)
-
-			logger.Info("Metrics unavailable for VA, skipping",
-				"variant", updateVA.Name,
-				"reason", metricsValidation.Reason,
-				"troubleshooting", metricsValidation.Message)
-			continue
-		}
-
-		// Collect raw metrics from collector
-		metrics, err := metricsCollector.AddMetricsToOptStatus(ctx, &updateVA, deploy, cost)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to fetch metrics for VA",
-				"variant", updateVA.Name,
-				"error", err)
-			continue
-		}
-
-		// Assemble Allocation struct from raw metrics
-		currentAllocation, err := utils.BuildAllocationFromMetrics(metrics, &updateVA, deploy, cost)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to build allocation for VA",
-				"variant", updateVA.Name,
-				"error", err)
-			continue
-		}
-
-		// Update the VA in vaMap with populated CurrentAlloc
-		updateVA.Status.CurrentAlloc = currentAllocation
-
-		// Update vaMap with the VA that has CurrentAlloc populated
-		// Use deployment name as key to match the initial vaMap population
-		vaMap[updateVA.GetScaleTargetName()] = &updateVA
-
-		logger.Info("Metrics collected for VA",
-			"variant", updateVA.Name,
-			"replicas", currentAllocation.NumReplicas,
-			"accelerator", currentAllocation.Accelerator,
-			"ttft", currentAllocation.TTFTAverage,
-			"itl", currentAllocation.ITLAverage,
-			"cost", cost)
-	}
-
-	return nil
-}
-
 // applySaturationDecisions updates VA status and emits metrics based on Saturation decisions.
 func (e *Engine) applySaturationDecisions(
 	ctx context.Context,
 	decisions []interfaces.VariantDecision,
 	vaMap map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	currentAllocations map[string]*interfaces.Allocation,
 ) error {
 	logger := ctrl.LoggerFrom(ctx)
 	// Create a map of decisions for O(1) lookup
+	// Use namespace/variantName as key to match vaMap and avoid collisions
 	decisionMap := make(map[string]interfaces.VariantDecision)
 	for _, d := range decisions {
-		decisionMap[d.VariantName] = d
+		decisionMap[getVariantKey(d.Namespace, d.VariantName)] = d
 	}
 
 	// Iterate over ALL active VAs to ensure we update status and trigger reconciliation for everyone
@@ -585,9 +511,14 @@ func (e *Engine) applySaturationDecisions(
 		}
 
 		// Update CurrentAlloc from local analysis (which has the latest metrics)
-		// valid check: we only update if we have a valid current alloc from the analysis phase
-		if va.Status.CurrentAlloc.Accelerator != "" {
-			updateVa.Status.CurrentAlloc = va.Status.CurrentAlloc
+		// We use currentAllocations map instead of Status.CurrentAlloc
+		if currentAlloc, ok := currentAllocations[vaName]; ok {
+			// If we have a decision, attach current alloc to it for cache
+			// If we have a decision, attach current alloc to it for cache
+			// (Future logic if needed)
+			_ = currentAlloc // Used for something?
+			// Previously we updated va.Status.CurrentAlloc = currentAlloc
+			// Now we just don't update status with it.
 		}
 
 		// Copy MetricsAvailable condition from local analysis (set during metrics collection)
@@ -614,14 +545,14 @@ func (e *Engine) applySaturationDecisions(
 			// We effectively explicitly "decide" to keep things as they are if no decision was made
 			if updateVa.Status.DesiredOptimizedAlloc.NumReplicas > 0 {
 				targetReplicas = updateVa.Status.DesiredOptimizedAlloc.NumReplicas
-			} else {
-				targetReplicas = updateVa.Status.CurrentAlloc.NumReplicas
+			} else if curr, ok := currentAllocations[vaName]; ok {
+				targetReplicas = curr.NumReplicas
 			}
 			// Keep existing accelerator or use current
 			if updateVa.Status.DesiredOptimizedAlloc.Accelerator != "" {
 				acceleratorName = updateVa.Status.DesiredOptimizedAlloc.Accelerator
-			} else {
-				acceleratorName = updateVa.Status.CurrentAlloc.Accelerator
+			} else if curr, ok := currentAllocations[vaName]; ok {
+				acceleratorName = curr.Accelerator
 			}
 			reason = "No scaling decision (optimization loop)"
 		}
@@ -712,7 +643,7 @@ func (e *Engine) applySaturationDecisions(
 			TargetReplicas:    targetReplicas,
 			AcceleratorName:   acceleratorName,
 			LastRunTime:       metav1.Now(),
-			CurrentAllocation: &updateVa.Status.CurrentAlloc,
+			CurrentAllocation: currentAllocations[vaName],
 			// Pass other fields if needed, but these are crucial for Status
 		})
 
@@ -727,15 +658,6 @@ func (e *Engine) applySaturationDecisions(
 				"action", decision.Action,
 				"target", targetReplicas,
 				"reason", reason)
-
-			// Invalidate cache when scaling occurs
-			if decision.Action != interfaces.ActionNoChange {
-				if promCollector, ok := e.MetricsCollector.(*prometheus.PrometheusCollector); ok {
-					promCollector.InvalidateCacheForVariant(decision.ModelID, decision.Namespace, decision.VariantName)
-					logger.V(logging.DEBUG).Info("Invalidated metrics cache after scaling",
-						"variant", decision.VariantName)
-				}
-			}
 		}
 	}
 
@@ -746,6 +668,7 @@ func (e *Engine) applySaturationDecisions(
 func (e *Engine) emitSafetyNetMetrics(
 	ctx context.Context,
 	modelVAs []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	currentAllocations map[string]*interfaces.Allocation,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 	act := actuator.NewActuator(e.client)
@@ -758,9 +681,11 @@ func (e *Engine) emitSafetyNetMetrics(
 		// Get current replicas for metric emission
 		currentReplicas, err := act.GetCurrentDeploymentReplicas(ctx, &va)
 		if err != nil {
-			logger.Error(err, "Safety net: failed to get current replicas from Deployment for metrics", "using VariantAutoscaling status",
+			logger.Error(err, "Safety net: failed to get current replicas from Deployment for metrics", "using cached allocation",
 				"variant", va.Name)
-			currentReplicas = int32(va.Status.CurrentAlloc.NumReplicas)
+			if curr, ok := currentAllocations[va.GetScaleTargetName()]; ok {
+				currentReplicas = int32(curr.NumReplicas)
+			}
 		}
 
 		// Strategy 1: Use previous desired replicas if available
@@ -777,7 +702,9 @@ func (e *Engine) emitSafetyNetMetrics(
 		// with required accelerator field
 		accelerator := va.Status.DesiredOptimizedAlloc.Accelerator
 		if accelerator == "" {
-			accelerator = va.Status.CurrentAlloc.Accelerator
+			if curr, ok := currentAllocations[va.GetScaleTargetName()]; ok {
+				accelerator = curr.Accelerator
+			}
 		}
 		if accelerator == "" {
 			// Try to get from VA labels as last resort

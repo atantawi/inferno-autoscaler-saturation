@@ -199,56 +199,28 @@ func CreateSystemData(
 }
 
 // add model accelerator pair profile data to inferno system data
-func AddModelAcceleratorProfileToSystemData(
-	sd *infernoConfig.SystemData,
-	modelName string,
-	modelAcceleratorProfile *llmdVariantAutoscalingV1alpha1.AcceleratorProfile) (err error) {
-
-	// extract decode model (itl) parameters
-	// TODO: These parameters are currently hardcoded for testing purposes as we transition
-	// away from storing them in the CRD.
-	// In the future, these should be retrieved from a config map or another source.
-	alpha := 20.28
-	beta := 0.72
-
-	// extract prefill model (ttft) parameters
-	// TODO: These parameters are currently hardcoded for testing purposes.
-	gamma := 0.0
-	delta := 0.0
-
-	sd.Spec.Models.PerfData = append(sd.Spec.Models.PerfData,
-		infernoConfig.ModelAcceleratorPerfData{
-			Name:         modelName,
-			Acc:          modelAcceleratorProfile.Acc,
-			AccCount:     modelAcceleratorProfile.AccCount,
-			MaxBatchSize: modelAcceleratorProfile.MaxBatchSize,
-			DecodeParms: infernoConfig.DecodeParms{
-				Alpha: float32(alpha),
-				Beta:  float32(beta),
-			},
-			PrefillParms: infernoConfig.PrefillParms{
-				Gamma: float32(gamma),
-				Delta: float32(delta),
-			},
-		})
-	return nil
-}
 
 // Add server specs to inferno system data
 func AddServerInfoToSystemData(
 	sd *infernoConfig.SystemData,
 	va *llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	currentAlloc *interfaces.Allocation,
 	className string) (err error) {
 
 	// server load statistics
 	var arrivalRate, avgOutputTokens, avgInputTokens, cost, itlAverage, ttftAverage float64
-	if arrivalRate, err = strconv.ParseFloat(va.Status.CurrentAlloc.Load.ArrivalRate, 32); err != nil || !CheckValue(arrivalRate) {
+	if currentAlloc == nil {
+		// Use empty/default values if no current allocation
+		currentAlloc = &interfaces.Allocation{}
+	}
+
+	if arrivalRate, err = strconv.ParseFloat(currentAlloc.Load.ArrivalRate, 32); err != nil || !CheckValue(arrivalRate) {
 		arrivalRate = 0
 	}
-	if avgOutputTokens, err = strconv.ParseFloat(va.Status.CurrentAlloc.Load.AvgOutputTokens, 32); err != nil || !CheckValue(avgOutputTokens) {
+	if avgOutputTokens, err = strconv.ParseFloat(currentAlloc.Load.AvgOutputTokens, 32); err != nil || !CheckValue(avgOutputTokens) {
 		avgOutputTokens = 0
 	}
-	if avgInputTokens, err = strconv.ParseFloat(va.Status.CurrentAlloc.Load.AvgInputTokens, 32); err != nil || !CheckValue(avgInputTokens) {
+	if avgInputTokens, err = strconv.ParseFloat(currentAlloc.Load.AvgInputTokens, 32); err != nil || !CheckValue(avgInputTokens) {
 		avgInputTokens = 0
 	}
 
@@ -271,21 +243,21 @@ func AddServerInfoToSystemData(
 		unitCost = 10.0 // Fallback/Default
 	}
 
-	cost = unitCost * float64(va.Status.CurrentAlloc.NumReplicas)
+	cost = unitCost * float64(currentAlloc.NumReplicas)
 	if !CheckValue(cost) {
 		cost = 0
 	}
-	if itlAverage, err = strconv.ParseFloat(va.Status.CurrentAlloc.ITLAverage, 32); err != nil || !CheckValue(itlAverage) {
+	if itlAverage, err = strconv.ParseFloat(currentAlloc.ITLAverage, 32); err != nil || !CheckValue(itlAverage) {
 		itlAverage = 0
 	}
-	if ttftAverage, err = strconv.ParseFloat(va.Status.CurrentAlloc.TTFTAverage, 32); err != nil || !CheckValue(ttftAverage) {
+	if ttftAverage, err = strconv.ParseFloat(currentAlloc.TTFTAverage, 32); err != nil || !CheckValue(ttftAverage) {
 		ttftAverage = 0
 	}
 
 	AllocationData := &infernoConfig.AllocationData{
-		Accelerator: va.Status.CurrentAlloc.Accelerator,
-		NumReplicas: va.Status.CurrentAlloc.NumReplicas,
-		MaxBatch:    va.Status.CurrentAlloc.MaxBatch,
+		Accelerator: currentAlloc.Accelerator,
+		NumReplicas: currentAlloc.NumReplicas,
+		MaxBatch:    currentAlloc.MaxBatch,
 		Cost:        float32(cost),
 		ITLAverage:  float32(itlAverage),
 		TTFTAverage: float32(ttftAverage),
@@ -308,14 +280,12 @@ func AddServerInfoToSystemData(
 	}
 
 	// set max batch size if configured
-	maxBatchSize := 0
-	accName := va.Labels["inference.optimization/acceleratorName"]
-	for _, ap := range va.Spec.ModelProfile.Accelerators {
-		if ap.Acc == accName {
-			maxBatchSize = ap.MaxBatchSize
-			break
-		}
-	}
+	maxBatchSize := 32 // Default value now that ModelProfile is removed
+
+	// set max batch size if configured - now handled by capacity/hardcoded or label-based lookups
+	// For now, removing the dependency on ModelProfile.
+	// TODO: Retrieve this from a ConfigMap or other source if needed.
+
 	if maxBatchSize > 0 {
 		serverSpec.MaxBatchSize = maxBatchSize
 	}
