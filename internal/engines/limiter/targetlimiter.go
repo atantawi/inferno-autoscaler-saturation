@@ -220,12 +220,7 @@ func createModelData(
 			modelAcceleratorMap[model] = make(map[string]int)
 			modelNames = append(modelNames, model)
 		}
-		// TODO: The current implementation assumes that each model can be accelerated by multiple accelerator units.
-		// This is a simplification for the sake of creating the ModelData for the optimizer.
-		// In a real implementation, you might want to derive this information from the inventory or from a more detailed
-		// specification of which models can run on which accelerators, rather than inferring it from the decisions.
-		// For now, we simply set the count to 1 for each model-accelerator pair found in the decisions to indicate that this combination is valid.
-		modelAcceleratorMap[model][acc] = 1
+		modelAcceleratorMap[model][acc] = decision.GPUsPerReplica
 	}
 	for model, accMap := range modelAcceleratorMap {
 		for acc, count := range accMap {

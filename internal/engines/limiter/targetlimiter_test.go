@@ -187,6 +187,7 @@ func Test_createModelData(t *testing.T) {
 					VariantName:     "variant-1",
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ModelData{
@@ -207,11 +208,13 @@ func Test_createModelData(t *testing.T) {
 					VariantName:     "variant-1",
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
 					ModelID:         "model-2",
 					AcceleratorName: "nvidia-tesla-v100",
+					GPUsPerReplica:  2,
 				},
 			},
 			want: &config.ModelData{
@@ -224,7 +227,7 @@ func Test_createModelData(t *testing.T) {
 					{
 						Name:     "model-2",
 						Acc:      "nvidia-tesla-v100",
-						AccCount: 1,
+						AccCount: 2,
 					},
 				},
 			},
@@ -237,11 +240,13 @@ func Test_createModelData(t *testing.T) {
 					VariantName:     "variant-1",
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-v100",
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ModelData{
@@ -267,11 +272,13 @@ func Test_createModelData(t *testing.T) {
 					VariantName:     "variant-1",
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
 					ModelID:         "model-2",
 					AcceleratorName: "nvidia-tesla-k80",
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ModelData{
@@ -379,6 +386,7 @@ func Test_createServerData(t *testing.T) {
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
 					CurrentReplicas: 2,
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ServerData{
@@ -404,12 +412,14 @@ func Test_createServerData(t *testing.T) {
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
 					CurrentReplicas: 2,
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
 					ModelID:         "model-2",
 					AcceleratorName: "nvidia-tesla-v100",
 					CurrentReplicas: 4,
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ServerData{
@@ -452,12 +462,14 @@ func Test_createServerData(t *testing.T) {
 					ModelID:         "model-1",
 					AcceleratorName: "nvidia-tesla-k80",
 					CurrentReplicas: 0,
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
 					ModelID:         "model-2",
 					AcceleratorName: "nvidia-tesla-k80",
 					CurrentReplicas: 10,
+					GPUsPerReplica:  1,
 				},
 			},
 			want: &config.ServerData{
@@ -517,6 +529,7 @@ func Test_setAllocationsForServers(t *testing.T) {
 					AcceleratorName: "nvidia-tesla-k80",
 					TargetReplicas:  2,
 					Cost:            100,
+					GPUsPerReplica:  1,
 				},
 			},
 		},
@@ -539,6 +552,7 @@ func Test_setAllocationsForServers(t *testing.T) {
 					AcceleratorName: "nvidia-tesla-k80",
 					TargetReplicas:  2,
 					Cost:            100,
+					GPUsPerReplica:  1,
 				},
 				{
 					VariantName:     "variant-2",
@@ -546,6 +560,7 @@ func Test_setAllocationsForServers(t *testing.T) {
 					AcceleratorName: "nvidia-tesla-v100",
 					TargetReplicas:  4,
 					Cost:            200,
+					GPUsPerReplica:  1,
 				},
 			},
 		},
@@ -564,6 +579,7 @@ func Test_setAllocationsForServers(t *testing.T) {
 					AcceleratorName: "nvidia-tesla-v100",
 					TargetReplicas:  4,
 					Cost:            200,
+					GPUsPerReplica:  1,
 				},
 			},
 		},
@@ -582,6 +598,7 @@ func Test_setAllocationsForServers(t *testing.T) {
 					AcceleratorName: "nvidia-tesla-k80",
 					TargetReplicas:  0,
 					Cost:            0,
+					GPUsPerReplica:  1,
 				},
 			},
 		},

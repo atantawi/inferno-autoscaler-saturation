@@ -26,15 +26,11 @@ func GetAvailableInventory(
 		}
 	}
 
-	// TODO: Obtain the number of accelerators per replica for each variant from the resources of the corresponding deployment.
-	// For now, we assume each replica requires 1 accelerator.
-	numAcceleratorsPerReplica := 1
-
 	// Subtract the counts of each accelerator type that have been allocated to variants based on the decisions.
 	for _, d := range *decisions {
 		accType := d.AcceleratorName
 		if accInfo, exists := availableInventory[accType]; exists {
-			accInfo.Count -= d.CurrentReplicas * numAcceleratorsPerReplica
+			accInfo.Count -= d.CurrentReplicas * d.GPUsPerReplica
 			if accInfo.Count < 0 {
 				accInfo.Count = 0
 			}

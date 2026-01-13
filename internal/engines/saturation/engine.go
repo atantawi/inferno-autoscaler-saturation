@@ -305,13 +305,27 @@ func (e *Engine) BuildVariantStates(
 			pendingReplicas = 0
 		}
 
-		ctrl.LoggerFrom(ctx).V(1).Info("BuildVariantStates result", "variant", va.Name, "currentReplicas", currentReplicas, "readyReplicas", readyReplicas, "pendingReplicas", pendingReplicas)
+		// get number of GPUs per replica
+		gpusPerReplica := 0
+		if deploy.Spec.Template.Spec.Containers != nil {
+			for _, container := range deploy.Spec.Template.Spec.Containers {
+				if container.Resources.Requests != nil {
+					if gpu, exists := container.Resources.Requests["nvidia.com/gpu"]; exists {
+						gpusPerReplica += int(gpu.MilliValue())
+					}
+				}
+			}
+		}
+
+		ctrl.LoggerFrom(ctx).V(1).Info("BuildVariantStates result", "variant", va.Name, "currentReplicas", currentReplicas, "readyReplicas",
+			readyReplicas, "pendingReplicas", pendingReplicas, "gpusPerReplica", gpusPerReplica)
 
 		states = append(states, interfaces.VariantReplicaState{
 			VariantName:     deploy.Name,
 			CurrentReplicas: currentReplicas,
 			DesiredReplicas: va.Status.DesiredOptimizedAlloc.NumReplicas,
 			PendingReplicas: pendingReplicas,
+			GPUsPerReplica:  gpusPerReplica,
 		})
 	}
 
@@ -368,6 +382,7 @@ func (e *Engine) convertSaturationTargetsToDecisions(
 			ModelBasedDecision: false,
 			SafetyOverride:     false,
 			Reason:             "saturation-only mode: " + string(action),
+			GPUsPerReplica:     state.GPUsPerReplica,
 		}
 
 		if va != nil {
@@ -483,126 +498,6 @@ func (e *Engine) RunSaturationAnalysis(
 	return saturationTargets, saturationAnalysis, variantStates, nil
 }
 
-// CollectMetricsForSaturationMode collects metrics and populates CurrentAlloc for VAs in saturation-only mode.
-func (e *Engine) CollectMetricsForSaturationMode(
-	ctx context.Context,
-	modelVAs []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	vaMap map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	k8sClient client.Client,
-	metricsCollector interfaces.MetricsCollector,
-) error {
-	logger := ctrl.LoggerFrom(ctx)
-
-	for i := range modelVAs {
-		va := &modelVAs[i]
-		modelName := va.Spec.ModelID
-
-		// Get accelerator name from VA labels - required field
-		accName := va.Labels["inference.optimization/acceleratorName"]
-		if accName == "" {
-			logger.Info("Missing accelerator name label for VA, skipping",
-				"variant", va.Name)
-			continue
-		}
-
-		// Extract accelerator cost from VA.Spec.VariantCost - required field
-		if va.Spec.VariantCost == "" {
-			logger.Info("Missing variant cost for VA, skipping",
-				"variant", va.Name)
-			continue
-		}
-		cost, err := strconv.ParseFloat(va.Spec.VariantCost, 64)
-		if err != nil {
-			logger.Info("Invalid variant cost for VA, skipping",
-				"variant", va.Name,
-				"cost", va.Spec.VariantCost,
-				"error", err)
-			continue
-		}
-
-		// Get Deployment using ScaleTargetRef
-		var deploy appsv1.Deployment
-		err = utils.GetDeploymentWithBackoff(ctx, k8sClient, va.GetScaleTargetName(), va.Namespace, &deploy)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Could not get deployment for VA, skipping",
-				"variant", va.Name,
-				"deployment", va.GetScaleTargetName(),
-				"error", err)
-			continue // Skip VAs without deployments
-		}
-
-		// Fetch latest VA from API server (use VA name, not deployment name - they are now decoupled)
-		var updateVA llmdVariantAutoscalingV1alpha1.VariantAutoscaling
-		err = utils.GetVariantAutoscalingWithBackoff(ctx, k8sClient, va.Name, va.Namespace, &updateVA)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to get VA",
-				"variant", va.Name,
-				"error", err)
-			continue
-		}
-
-		// Validate metrics availability before collecting
-		metricsValidation := metricsCollector.ValidateMetricsAvailability(ctx, modelName, deploy.Namespace)
-
-		// Update MetricsAvailable condition based on validation result
-		if metricsValidation.Available {
-			llmdVariantAutoscalingV1alpha1.SetCondition(&updateVA,
-				llmdVariantAutoscalingV1alpha1.TypeMetricsAvailable,
-				metav1.ConditionTrue,
-				metricsValidation.Reason,
-				metricsValidation.Message)
-		} else {
-			// Metrics unavailable - set condition and skip
-			llmdVariantAutoscalingV1alpha1.SetCondition(&updateVA,
-				llmdVariantAutoscalingV1alpha1.TypeMetricsAvailable,
-				metav1.ConditionFalse,
-				metricsValidation.Reason,
-				metricsValidation.Message)
-
-			logger.Info("Metrics unavailable for VA, skipping",
-				"variant", updateVA.Name,
-				"reason", metricsValidation.Reason,
-				"troubleshooting", metricsValidation.Message)
-			continue
-		}
-
-		// Collect raw metrics from collector
-		metrics, err := metricsCollector.AddMetricsToOptStatus(ctx, &updateVA, deploy, cost)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to fetch metrics for VA",
-				"variant", updateVA.Name,
-				"error", err)
-			continue
-		}
-
-		// Assemble Allocation struct from raw metrics
-		currentAllocation, err := utils.BuildAllocationFromMetrics(metrics, &updateVA, deploy, cost)
-		if err != nil {
-			logger.V(logging.DEBUG).Info("Unable to build allocation for VA",
-				"variant", updateVA.Name,
-				"error", err)
-			continue
-		}
-
-		// Update the VA in vaMap with populated CurrentAlloc
-		updateVA.Status.CurrentAlloc = currentAllocation
-
-		// Update vaMap with the VA that has CurrentAlloc populated
-		// Use deployment name as key to match the initial vaMap population
-		vaMap[updateVA.GetScaleTargetName()] = &updateVA
-
-		logger.Info("Metrics collected for VA",
-			"variant", updateVA.Name,
-			"replicas", currentAllocation.NumReplicas,
-			"accelerator", currentAllocation.Accelerator,
-			"ttft", currentAllocation.TTFTAverage,
-			"itl", currentAllocation.ITLAverage,
-			"cost", cost)
-	}
-
-	return nil
-}
-
 // applySaturationDecisions updates VA status and emits metrics based on Saturation decisions.
 func (e *Engine) applySaturationDecisions(
 	ctx context.Context,
@@ -659,11 +554,13 @@ func (e *Engine) applySaturationDecisions(
 		var targetReplicas int
 		var acceleratorName string
 		var reason string
+		var gpusPerReplica int
 
 		if hasDecision {
 			targetReplicas = decision.TargetReplicas
 			acceleratorName = decision.AcceleratorName
 			reason = decision.Reason
+			gpusPerReplica = decision.GPUsPerReplica
 		} else {
 			// No change/decision: Keep current target or default to current replicas
 			// We effectively explicitly "decide" to keep things as they are if no decision was made
@@ -801,6 +698,8 @@ func (e *Engine) applySaturationDecisions(
 			MetricsAvailable:  metricsAvailable,
 			MetricsReason:     metricsReason,
 			MetricsMessage:    metricsMessage,
+			// Pass other fields if needed, but these are crucial for Status
+			GPUsPerReplica: gpusPerReplica,
 		})
 
 		// 2. Trigger Reconciler
