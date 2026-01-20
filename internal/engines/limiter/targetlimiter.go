@@ -15,16 +15,12 @@ import (
 const (
 	// DefaultTargetLimiterSaturationPolicy is the default policy used when the limited capacity is saturated
 	DefaultTargetLimiterSaturationPolicy = "PriorityRoundRobin"
-
-	// DefaultTargetLimiterServiceClassName is the default name for the service class used in limited capacity allocation
-	DefaultTargetLimiterServiceClassName = "Default"
 )
 
 // TargetLimiterConfig holds configuration for the TargetLimiter
 type TargetLimiterConfig struct {
 	LimiterConfig
 	SaturationPolicy string
-	ServiceClassName string
 }
 
 // TargetLimiter distributes the available limited amount of GPUs among variants,
@@ -44,9 +40,6 @@ func NewTargetLimiter(config *TargetLimiterConfig) (*TargetLimiter, error) {
 	}
 	if config.SaturationPolicy == "" {
 		config.SaturationPolicy = DefaultTargetLimiterSaturationPolicy
-	}
-	if config.ServiceClassName == "" {
-		config.ServiceClassName = DefaultTargetLimiterServiceClassName
 	}
 	return &TargetLimiter{
 		config: config,
@@ -240,7 +233,7 @@ func createServiceClassData(
 	svcClassData := &config.ServiceClassData{
 		Spec: []config.ServiceClassSpec{
 			{
-				Name: DefaultTargetLimiterServiceClassName,
+				Name: config.DefaultServiceClassName,
 				// TODO: The current implementation assumes that all models belong to the same service class.
 				// In a more complex scenario, you might have different service classes for different models or groups of models.
 				// The ModelTargets field is populated with all the model names to indicate that this service class can serve all the models.
@@ -272,7 +265,7 @@ func createServerData(decisions []interfaces.VariantDecision) *config.ServerData
 		serverData.Spec[i] = config.ServerSpec{
 			Name:            decision.VariantName,
 			Model:           decision.ModelID,
-			Class:           DefaultTargetLimiterServiceClassName,
+			Class:           config.DefaultServiceClassName,
 			KeepAccelerator: true,
 			CurrentAlloc: config.AllocationData{
 				Accelerator: decision.AcceleratorName,
